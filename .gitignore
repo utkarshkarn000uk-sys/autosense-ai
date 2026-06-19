@@ -4,13 +4,8 @@ __pycache__/
 .env
 backend/.env
 frontend/build/
-*.pkl
-*.npy
-*.ipynb
 data/
 backend/cars_cleaned.csv
-backend/cars_decoded.csv
-backend/encoders.json
 backend/test_db.py
 backend/test_groq.py
 backend/fix_names.py
