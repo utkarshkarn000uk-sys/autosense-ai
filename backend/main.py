@@ -45,6 +45,8 @@ try:
     xgb_model = joblib.load("model.pkl")
     feature_names = joblib.load("feature_names.pkl")
     explainer = joblib.load("shap_explainer.pkl")
+    with open("encoders.json") as f:
+        encoders = json.load(f)
     print("Models loaded successfully!")
 except Exception as e:
     print(f"Models failed to load: {e}")
@@ -55,29 +57,32 @@ except Exception as e:
     import shap
 
     train_df = pd.read_csv("cars_decoded.csv")
+    print(f"Columns found: {train_df.columns.tolist()}")
     print(f"Loaded {len(train_df):,} cars for training")
 
-    cat_cols = ['manufacturer', 'condition', 'cylinders', 'fuel',
-                'transmission', 'drive', 'type', 'paint_color', 'state']
+    all_cat_cols = ['manufacturer', 'condition', 'cylinders', 'fuel',
+                    'transmission', 'drive', 'type', 'paint_color', 'state']
+    cat_cols = [c for c in all_cat_cols if c in train_df.columns]
 
-    encoders_dict = {}
+    encoders = {}
     for col in cat_cols:
         le = LabelEncoder()
         train_df[col] = le.fit_transform(train_df[col].astype(str))
-        encoders_dict[col] = list(le.classes_)
+        encoders[col] = list(le.classes_)
 
     with open("encoders.json", "w") as f:
-        json.dump(encoders_dict, f)
+        json.dump(encoders, f)
 
     train_df['car_age'] = 2024 - train_df['year']
     train_df['miles_per_year'] = train_df['odometer'] / (train_df['car_age'] + 1)
     train_df['is_luxury'] = 0
     train_df['is_clean_title'] = 1
 
-    feature_names = ['year', 'manufacturer', 'condition', 'cylinders',
-                     'fuel', 'odometer', 'transmission', 'drive',
-                     'type', 'paint_color', 'state', 'car_age',
-                     'miles_per_year', 'is_luxury', 'is_clean_title']
+    all_features = ['year', 'manufacturer', 'condition', 'cylinders',
+                    'fuel', 'odometer', 'transmission', 'drive',
+                    'type', 'paint_color', 'state', 'car_age',
+                    'miles_per_year', 'is_luxury', 'is_clean_title']
+    feature_names = [f for f in all_features if f in train_df.columns]
 
     X = train_df[feature_names]
     y = train_df['price']
@@ -97,9 +102,6 @@ except Exception as e:
     joblib.dump(feature_names, "feature_names.pkl")
     joblib.dump(explainer, "shap_explainer.pkl")
     print("Models saved!")
-
-with open("encoders.json") as f:
-    encoders = json.load(f)
 
 df = pd.read_csv("cars_decoded.csv")
 print(f"Loaded {len(df):,} cars!")
