@@ -1,4 +1,5 @@
 import os
+import gc
 import json
 import joblib
 import numpy as np
@@ -36,22 +37,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["*"],
 )
 
-# ── Load or train models ──────────────────────────────────────
 print("Loading ML models...")
-
-# First print what CSV columns we have
-try:
-    _check_df = pd.read_csv("cars_decoded.csv")
-    print(f"CSV columns: {_check_df.columns.tolist()}")
-    print(f"CSV shape: {_check_df.shape}")
-    del _check_df
-except Exception as csv_err:
-    print(f"CSV error: {csv_err}")
-
 try:
     xgb_model = joblib.load("model.pkl")
     feature_names = joblib.load("feature_names.pkl")
@@ -59,41 +49,31 @@ try:
     with open("encoders.json") as f:
         encoders = json.load(f)
     print("Models loaded successfully!")
-
 except Exception as e:
     print(f"Models failed to load: {e}")
-    print("Retraining from scratch...")
-
+    print("Retraining XGBoost model from scratch...")
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import LabelEncoder
     from xgboost import XGBRegressor
     import shap
 
     train_df = pd.read_csv("cars_decoded.csv")
-    print(f"Training data columns: {train_df.columns.tolist()}")
-
-    # Drop any completely empty columns
+    print(f"Columns found: {train_df.columns.tolist()}")
     train_df = train_df.dropna(axis=1, how='all')
 
-    # Make sure price and basic columns exist
-    required = ['price']
-    for r in required:
-        if r not in train_df.columns:
-            raise ValueError(f"Missing required column: {r}")
+    if 'price' not in train_df.columns:
+        raise ValueError("Missing required column: price")
 
-    # Add missing numeric columns with defaults
     if 'year' not in train_df.columns:
         train_df['year'] = 2015
     if 'odometer' not in train_df.columns:
         train_df['odometer'] = 50000
 
-    # Engineer features
     train_df['car_age'] = 2024 - pd.to_numeric(train_df['year'], errors='coerce').fillna(2015)
     train_df['miles_per_year'] = pd.to_numeric(train_df['odometer'], errors='coerce').fillna(50000) / (train_df['car_age'] + 1)
     train_df['is_luxury'] = 0
     train_df['is_clean_title'] = 1
 
-    # Encode categorical columns
     possible_cat_cols = ['manufacturer', 'condition', 'cylinders', 'fuel',
                          'transmission', 'drive', 'type', 'paint_color', 'state']
     cat_cols = [c for c in possible_cat_cols if c in train_df.columns]
@@ -107,15 +87,12 @@ except Exception as e:
     with open("encoders.json", "w") as f:
         json.dump(encoders, f)
 
-    # Build feature list from what's available
     all_possible_features = ['year', 'manufacturer', 'condition', 'cylinders',
                              'fuel', 'odometer', 'transmission', 'drive',
                              'type', 'paint_color', 'state', 'car_age',
                              'miles_per_year', 'is_luxury', 'is_clean_title']
     feature_names = [f for f in all_possible_features if f in train_df.columns]
-    print(f"Using features: {feature_names}")
 
-    # Clean data
     train_df = train_df.dropna(subset=['price'])
     train_df['price'] = pd.to_numeric(train_df['price'], errors='coerce')
     train_df = train_df.dropna(subset=['price'])
@@ -124,7 +101,11 @@ except Exception as e:
     X = train_df[feature_names].fillna(0)
     y = train_df['price']
 
-    print(f"Training on {len(X):,} samples with {len(feature_names)} features")
+    # Use only 50% of data to save memory
+    X = X.sample(frac=0.5, random_state=42)
+    y = y.loc[X.index]
+
+    print(f"Training on {len(X):,} samples")
 
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42)
@@ -142,11 +123,16 @@ except Exception as e:
     joblib.dump(explainer, "shap_explainer.pkl")
     print("Models saved!")
 
-# ── Load main dataframe ───────────────────────────────────────
-df = pd.read_csv("cars_decoded.csv")
-print(f"Loaded {len(df):,} cars!")
+    del train_df, X, y, X_train, X_test, y_train, y_test
+    gc.collect()
 
-# ── Auth ──────────────────────────────────────────────────────
+# Load only needed columns to save memory
+needed_cols = ['manufacturer', 'year', 'odometer', 'condition',
+               'fuel', 'price', 'state', 'transmission']
+df = pd.read_csv("cars_decoded.csv", usecols=needed_cols)
+print(f"Loaded {len(df):,} cars!")
+gc.collect()
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -158,7 +144,6 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=401, detail="User not found")
     return user
 
-# ── Request models ────────────────────────────────────────────
 class RegisterRequest(BaseModel):
     email: str
     username: str
@@ -193,12 +178,11 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default"
 
-# ── Routes ────────────────────────────────────────────────────
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return {"message": "AutoSense AI API running!"}
 
-@app.get("/stats")
+@app.api_route("/stats", methods=["GET", "HEAD"])
 def get_stats():
     return {
         "total_listings": int(len(df)),
@@ -288,7 +272,6 @@ def predict(req: PredictRequest):
         else:
             shap_vals = raw_shap
         shap_vals = shap_vals.flatten()
-
         shap_data = []
         for i, fname in enumerate(feature_names):
             shap_data.append({
@@ -299,8 +282,7 @@ def predict(req: PredictRequest):
             })
         shap_data.sort(key=lambda x: abs(x['shap_value']), reverse=True)
     except Exception:
-        shap_data = [{"feature": f, "value": 0, "shap_value": 0, "impact": "unknown"}
-                     for f in feature_names[:5]]
+        shap_data = []
 
     return {
         "predicted_price": predicted_price,
@@ -327,8 +309,7 @@ def get_listings(
         result = result[pd.to_numeric(result['price'], errors='coerce') <= max_price]
     if len(result) > 0:
         result = result.sample(min(limit, len(result)))
-    cols = ['manufacturer', 'year', 'odometer', 'condition', 'fuel', 'price', 'state', 'transmission']
-    cols = [c for c in cols if c in result.columns]
+    cols = [c for c in needed_cols if c in result.columns]
     return result[cols].fillna('unknown').to_dict(orient='records')
 
 @app.get("/market/stats")
@@ -368,7 +349,6 @@ def delete_car(car_id: int, current_user: User = Depends(get_current_user), db: 
     db.commit()
     return {"message": "Car deleted!"}
 
-# ── LangGraph Chatbot ─────────────────────────────────────────
 llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.7)
 
 @tool
