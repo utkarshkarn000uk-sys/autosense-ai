@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const API = axios.create({
-  baseURL: 'https://proud-stillness-production-16e0.up.railway.app',
+  baseURL: 'https://autosense-ai-9bp8.onrender.com',
 })
 
 API.interceptors.request.use((config) => {
